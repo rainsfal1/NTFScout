@@ -21,19 +21,18 @@ type ApiConfig struct {
 }
 
 type Collection struct {
-	Name        string `json:"name"`
-	Contract    string `json:"contract"`
-	Description string `json:"description"`
-	FloorPrice  string `json:"floor_price"`
+	Contract   string   `json:"contract"`
+	Deployer   string   `json:"deployer"`
+	Name       string   `json:"name"`
+	TotalMints string   `json:"totalMints"`
+	IsReported []string `json:"isReported"`
 }
 
 type Transaction struct {
-	Hash     string `json:"hash"`
 	To       string `json:"to"`
-	Value    string `json:"value"`
-	NftCount string `json:"nft_count"`
-	CallData string `json:"call_data"`
-	EthValue string `json:"eth_value"`
+	CallData string `json:"callData"`
+	NftCount string `json:"nftCount"`
+	EthValue string `json:"ethValue"`
 }
 
 type CollectionResponse struct {
@@ -59,15 +58,20 @@ type OpenSeaResponse struct {
 }
 
 // Alchemy API response structures
-type AlchemyContract struct {
-	Address     string `json:"address"`
-	Name        string `json:"name"`
-	TotalSupply string `json:"totalSupply"`
-	Deployer    string `json:"deployerAddress"`
-}
-
 type AlchemyResponse struct {
-	Contracts []AlchemyContract `json:"contracts"`
+	Contracts []struct {
+		Address     string `json:"address"`
+		Name        string `json:"name"`
+		TotalSupply string `json:"totalSupply"`
+		TokenType   string `json:"tokenType"`
+		OpenSeaMetadata struct {
+			FloorPrice     interface{} `json:"floorPrice"`
+			CollectionName string      `json:"collectionName"`
+		} `json:"openSeaMetadata"`
+		IsSpam bool `json:"isSpam"`
+	} `json:"contracts"`
+	TotalCount int    `json:"totalCount"`
+	PageKey    string `json:"pageKey"`
 }
 
 func GetApiConfig() ApiConfig {
@@ -82,212 +86,136 @@ func GetApiConfig() ApiConfig {
 func FetchCollection(ctx context.Context) ([]Collection, error) {
 	config := GetApiConfig()
 	
-	// For now, return demo data if no API keys are configured
-	if config.AlchemyAPIKey == "" && config.OpenSeaAPIKey == "" {
-		return getDemoCollections(), nil
+	// Demo mode: if no API keys are configured, use mock data
+	if config.OpenSeaAPIKey == "" && config.AlchemyAPIKey == "" {
+		log.Println("No API keys configured, running in DEMO mode with mock data")
+		return createDemoCollections(), nil
 	}
 	
-	// Implement actual API calls here
+	// Combine data from both OpenSea and Alchemy
+	var allCollections []Collection
+	
+	// Fetch from OpenSea (trending collections on Base)
+	openSeaCollections, err := fetchFromOpenSea(ctx, config)
+	if err != nil {
+		log.Printf("OpenSea fetch error: %v", err)
+	} else {
+		allCollections = append(allCollections, openSeaCollections...)
+	}
+	
+	// Fetch from Alchemy (newly deployed contracts)
+	alchemyCollections, err := fetchFromAlchemy(ctx, config)
+	if err != nil {
+		log.Printf("Alchemy fetch error: %v", err)
+	} else {
+		allCollections = append(allCollections, alchemyCollections...)
+	}
+	
+	if len(allCollections) == 0 {
+		log.Println("No collections from APIs, falling back to demo data")
+		return createDemoCollections(), nil
+	}
+	
+	// Filter out reported collections and duplicates
+	filteredCollections := filterCollections(allCollections)
+	
+	log.Printf("Fetched %d collections from multiple sources", len(filteredCollections))
+	return filteredCollections, nil
+}
+
+func fetchFromOpenSea(ctx context.Context, config ApiConfig) ([]Collection, error) {
+	// OpenSea implementation would go here
+	// For now, return empty slice as OpenSea API requires specific endpoints
 	return []Collection{}, nil
 }
 
-func getDemoCollections() []Collection {
-	return []Collection{
-		{
-			Name:        "Demo Collection 1",
-			Contract:    "0x1234567890123456789012345678901234567890",
-			Description: "Demo NFT collection for testing",
-			FloorPrice:  "0.1",
-		},
-		{
-			Name:        "Demo Collection 2", 
-			Contract:    "0x0987654321098765432109876543210987654321",
-			Description: "Another demo collection",
-			FloorPrice:  "0.05",
-		},
+func fetchFromAlchemy(ctx context.Context, config ApiConfig) ([]Collection, error) {
+	if config.AlchemyAPIKey == "" {
+		return []Collection{}, fmt.Errorf("Alchemy API key not configured")
 	}
-}
 
-func fetchFromOpenSea(ctx context.Context, config *ApiConfig) ([]Collection, error) {
-	if config.OpenSeaAPIKey == "" {
-		return nil, errors.New("OpenSea API key not configured")
-	}
-	
-	// Get trending collections on Base chain
-	url := fmt.Sprintf("%s/collections?chain=base&order_by=seven_day_volume&limit=20", config.OpenSeaBaseURL)
-	
+	// Use a dummy address for testing - in production this would be dynamic
+	url := fmt.Sprintf("%s/%s/getContractsForOwner?owner=0x0000000000000000000000000000000000000000&withMetadata=true&pageSize=20", 
+		config.AlchemyBaseURL, config.AlchemyAPIKey)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	
-	req.Header.Set("X-API-KEY", config.OpenSeaAPIKey)
-	req.Header.Set("Accept", "application/json")
-	
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	response, err := client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
-	
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OpenSea API error: %s", response.Status)
-	}
-	
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
+	defer resp.Body.Close()
+
+	var alchemyResp AlchemyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&alchemyResp); err != nil {
 		return nil, err
 	}
-	
-	var openSeaResp OpenSeaResponse
-	if err := json.Unmarshal(body, &openSeaResp); err != nil {
-		return nil, err
-	}
-	
-	// Convert OpenSea format to our Collection format
+
+	// Log the response for debugging
+	respBytes, _ := json.Marshal(alchemyResp)
+	log.Printf("Alchemy API response: %s", string(respBytes))
+
 	var collections []Collection
-	for _, osCol := range openSeaResp.Collections {
-		if len(osCol.Contracts) > 0 {
-			collection := Collection{
-				Contract:   osCol.Contracts[0].Address,
-				Deployer:   "", // OpenSea doesn't provide deployer info
-				Name:       osCol.Name,
-				TotalMints: strconv.Itoa(osCol.TotalSupply),
-				IsReported: []string{}, // Assume not reported
-			}
-			collections = append(collections, collection)
+	for _, contract := range alchemyResp.Contracts {
+		if !contract.IsSpam && contract.Name != "" {
+			collections = append(collections, Collection{
+				Contract:   contract.Address,
+				Name:       contract.Name,
+				TotalMints: contract.TotalSupply,
+				Deployer:   contract.Address, // Using contract address as deployer for now
+				IsReported: []string{},
+			})
 		}
 	}
-	
+
 	return collections, nil
 }
 
-func fetchFromAlchemy(ctx context.Context, config *ApiConfig) ([]Collection, error) {
-	if config.AlchemyAPIKey == "" {
-		return nil, errors.New("Alchemy API key not configured")
-	}
-	
-	// Get recently deployed NFT contracts on Base
-	url := fmt.Sprintf("https://base-mainnet.g.alchemy.com/nft/v3/%s/getContractsForOwner?owner=0x0000000000000000000000000000000000000000&withMetadata=true&pageSize=20", config.AlchemyAPIKey)
-	
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	
-	req.Header.Set("Accept", "application/json")
-	
-	client := &http.Client{Timeout: 10 * time.Second}
-	response, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		log.Printf("Alchemy API response: %s", string(body))
-		return nil, fmt.Errorf("Alchemy API error: %s", response.Status)
-	}
-	
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, err
-	}
-	
-	log.Printf("Alchemy API response: %s", string(body))
-	
-	// For now, return empty since we need to understand the actual API structure
-	// We'll use OpenSea as primary source and add Alchemy later
-	return []Collection{}, nil
-}
-
 func filterCollections(collections []Collection) []Collection {
-	// Remove duplicates and filter out reported collections
 	seen := make(map[string]bool)
 	var filtered []Collection
 	
-	for _, col := range collections {
-		// Skip if already seen
-		if seen[col.Contract] {
-			continue
+	for _, collection := range collections {
+		if !seen[collection.Contract] && len(collection.IsReported) == 0 {
+			seen[collection.Contract] = true
+			filtered = append(filtered, collection)
 		}
-		seen[col.Contract] = true
-		
-		// Skip if reported
-		if len(col.IsReported) > 0 {
-			continue
-		}
-		
-		// Skip if contract address is empty
-		if col.Contract == "" {
-			continue
-		}
-		
-		filtered = append(filtered, col)
 	}
 	
 	return filtered
 }
 
-func GetTransaction(ctx context.Context, collection Collection) ([]Transaction, error) {
-	// For now, create mock transaction data for testing
-	mockTransaction := map[string]interface{}{
-		"To":       collection.Contract,
-		"CallData": "0x", // Would need to analyze contract ABI for actual mint function
-		"NftCount": "1",  // Default to minting 1 NFT
-		"EthValue": "0",  // Assume free mint initially
-	}
-	
-	// Convert mock transaction to Transaction format
-	transaction := Transaction{
-		To:       mockTransaction["To"].(string),
-		CallData: mockTransaction["CallData"].(string),
-		NftCount: mockTransaction["NftCount"].(string),
-		EthValue: mockTransaction["EthValue"].(string),
-	}
-	
-	// If you have specific contracts you know how to interact with,
-	// you could add more sophisticated transaction building here
-	
-	return []Transaction{transaction}, nil
-}
-
-// Helper function to create a mock collection for testing
-func CreateMockCollection() Collection {
-	return Collection{
-		Contract:   "0x1234567890123456789012345678901234567890",
-		Deployer:   "0x0987654321098765432109876543210987654321",
-		Name:       "Test Collection",
-		TotalMints: "100",
-		IsReported: []string{},
-	}
-}
-
-// Create demo collections for testing
 func createDemoCollections() []Collection {
 	return []Collection{
 		{
 			Contract:   "0x1234567890123456789012345678901234567890",
-			Deployer:   "0x0987654321098765432109876543210987654321",
-			Name:       "Demo NFT Collection #1",
-			TotalMints: "150",
+			Name:       "Demo NFT Collection 1",
+			TotalMints: "1000",
+			Deployer:   "0xdemo1234567890123456789012345678901234567890",
 			IsReported: []string{},
 		},
 		{
-			Contract:   "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-			Deployer:   "0x1111111111111111111111111111111111111111",
-			Name:       "Base Art Collection",
-			TotalMints: "75",
-			IsReported: []string{},
-		},
-		{
-			Contract:   "0x9999999999999999999999999999999999999999",
-			Deployer:   "0x2222222222222222222222222222222222222222",
-			Name:       "Free Mint Collection",
+			Contract:   "0x0987654321098765432109876543210987654321",
+			Name:       "Demo NFT Collection 2",
 			TotalMints: "500",
+			Deployer:   "0xdemo0987654321098765432109876543210987654321",
 			IsReported: []string{},
 		},
 	}
+}
+
+func GetTransaction(ctx context.Context, contract string) ([]Transaction, error) {
+	// Return demo transactions for now
+	return []Transaction{
+		{
+			To:       contract,
+			CallData: "0x",
+			NftCount: "1",
+			EthValue: "0.01",
+		},
+	}, nil
 }

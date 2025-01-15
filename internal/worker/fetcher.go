@@ -4,14 +4,28 @@ import (
 	"context"
 	"log"
 	"nftscout/internal/api"
+	"os"
+	"strconv"
 	"time"
 )
 
 func FetchWorker(ctx context.Context, dataChan chan<- []api.Collection) {
-	ticker := time.NewTicker(60 * time.Second) // Default 60 seconds
+	// Get fetch duration from environment variable
+	fetchDurationStr := os.Getenv("FETCH_DURATION")
+	if fetchDurationStr == "" {
+		fetchDurationStr = "60" // default to 60 seconds
+	}
+	
+	fetchDuration, err := strconv.Atoi(fetchDurationStr)
+	if err != nil {
+		log.Printf("Invalid FETCH_DURATION: %v, using default 60 seconds", err)
+		fetchDuration = 60
+	}
+	
+	ticker := time.NewTicker(time.Duration(fetchDuration) * time.Second)
 	defer ticker.Stop()
 
-	log.Println("Starting NFT collection fetch worker...")
+	log.Printf("Starting fetch worker with %d second intervals", fetchDuration)
 
 	for {
 		select {
