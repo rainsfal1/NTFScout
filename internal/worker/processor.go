@@ -4,38 +4,17 @@ import (
 	"context"
 	"log"
 	"nftscout/internal/api"
-	"nftscout/internal/db"
+	"nftscout/internal/helpers"
 )
 
-func ProcessWorker(ctx context.Context, dataChan <-chan []api.Collection, taskChan chan<- api.Collection, db *db.MongoDBPersister) {
-	log.Println("Starting data processor worker...")
-
+func TaskProcessor(ctx context.Context, dataChan <-chan []api.Collection, txChan chan<- helpers.ProcessedData) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Data processor stopped")
+			log.Println("Task Processor stopped")
 			return
 		case data := <-dataChan:
-			log.Printf("Processing %d collections...", len(data))
-			
-			for _, collection := range data {
-				// Store collection in database
-				if err := db.StoreCollection(collection); err != nil {
-					log.Printf("Error storing collection %s: %v", collection.Name, err)
-					continue
-				}
-				
-				// Send to task channel for minting
-				select {
-				case taskChan <- collection:
-					log.Printf("Collection %s queued for minting", collection.Name)
-				case <-ctx.Done():
-					log.Println("Task channel closed, stopping processor")
-					return
-				}
-			}
-			
-			log.Printf("Finished processing %d collections", len(data))
+			helpers.BroadCast(ctx, data, txChan)
 		}
 	}
 }
